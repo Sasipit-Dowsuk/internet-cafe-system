@@ -1,5 +1,6 @@
 
 import { useEffect, useMemo, useState } from "react";
+// ไอคอน
 import {
   Search,
   Plus,
@@ -12,14 +13,7 @@ import {
   Clock3,
   Ban,
 } from "lucide-react";
-import {
-  ref,
-  onValue,
-  set,
-  update,
-  remove,
-} from "firebase/database";
-import { database } from "../services/firebase";
+import { apiRequest } from "../services/api";
 
 const statusInfo = {
   available: { label: "ว่าง", className: "available" },
@@ -36,7 +30,7 @@ const emptyForm = {
 function Computers() {
   const [computers, setComputers] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [firebaseError, setFirebaseError] = useState("");
+  const [apiError, setApiError] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [modalOpen, setModalOpen] = useState(false);
@@ -46,36 +40,35 @@ function Computers() {
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
 
-  // โหลดข้อมูลเครื่องจาก Firebase แบบเรียลไทม์
+  // โหลดข้อมูลเครื่องผ่าน Backend API
+  const loadComputers = async () => {
+    setLoading(true);
+    try {
+      const data = await apiRequest("/api/computers");
+      const list = Array.isArray(data)
+        ? data
+        : Object.entries(data || {}).map(([key, value]) => ({
+            ...value,
+            firebaseKey: value.firebaseKey || value.id || key,
+          }));
+
+      setComputers(
+        list.map((item) => ({
+          ...item,
+          firebaseKey: item.firebaseKey || item.id,
+        }))
+      );
+      setApiError("");
+    } catch (err) {
+      console.error("โหลดข้อมูลเครื่องไม่สำเร็จ:", err);
+      setApiError(err.message || "โหลดข้อมูลเครื่องไม่สำเร็จ");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const computersRef = ref(database, "computers");
-
-    const unsubscribe = onValue(
-      computersRef,
-      (snapshot) => {
-        const data = snapshot.val();
-
-        const list = data
-          ? Object.entries(data).map(([key, value]) => ({
-              ...value,
-              firebaseKey: key,
-            }))
-          : [];
-
-        setComputers(list);
-        setFirebaseError("");
-        setLoading(false);
-      },
-      (firebaseError) => {
-        console.error("โหลดข้อมูลเครื่องไม่สำเร็จ:", firebaseError);
-        setFirebaseError(
-          "โหลดข้อมูลไม่สำเร็จ กรุณาตรวจสอบการเชื่อมต่อและ Firebase Rules"
-        );
-        setLoading(false);
-      }
-    );
-
-    return () => unsubscribe();
+    loadComputers();
   }, []);
 
   // สรุปจำนวนเครื่องตามสถานะ
@@ -154,7 +147,7 @@ function Computers() {
     const duplicate = computers.some(
       (computer) =>
         String(computer.id || "").toUpperCase() === id &&
-        computer.firebaseKey !== editingId
+        String(computer.firebaseKey) !== String(editingId)
     );
 
     if (duplicate) {
@@ -167,25 +160,24 @@ function Computers() {
 
     try {
       if (editingId) {
-        await update(ref(database, `computers/${editingId}`), {
-          name,
+        await apiRequest(`/api/computers/${encodeURIComponent(editingId)}`, {
+          method: "PUT",
+          body: JSON.stringify({ name }),
         });
       } else {
-        await set(ref(database, `computers/${id}`), {
-          id,
-          name,
-          status: "available",
+        await apiRequest("/api/computers", {
+          method: "POST",
+          body: JSON.stringify({ id, name, status: "available" }),
         });
       }
+      await loadComputers();
 
       setModalOpen(false);
       setEditingId(null);
       setForm(emptyForm);
-    } catch (firebaseError) {
-      console.error("บันทึกข้อมูลเครื่องไม่สำเร็จ:", firebaseError);
-      setError(
-        "บันทึกไม่สำเร็จ กรุณาตรวจสอบการเชื่อมต่อและ Firebase Rules"
-      );
+    } catch (apiErr) {
+      console.error("บันทึกข้อมูลเครื่องไม่สำเร็จ:", apiErr);
+      setError(apiErr.message || "บันทึกข้อมูลเครื่องไม่สำเร็จ");
     } finally {
       setSaving(false);
     }
@@ -201,13 +193,14 @@ function Computers() {
         : "available";
 
     try {
-      await update(
-        ref(database, `computers/${computer.firebaseKey}`),
-        { status: nextStatus }
-      );
-    } catch (firebaseError) {
-      console.error("เปลี่ยนสถานะเครื่องไม่สำเร็จ:", firebaseError);
-      alert("เปลี่ยนสถานะไม่สำเร็จ กรุณาตรวจสอบ Firebase Rules");
+      await apiRequest(`/api/computers/${encodeURIComponent(computer.firebaseKey)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      await loadComputers();
+    } catch (apiErr) {
+      console.error("เปลี่ยนสถานะเครื่องไม่สำเร็จ:", apiErr);
+      alert(apiErr.message || "เปลี่ยนสถานะเครื่องไม่สำเร็จ");
     }
   };
 
@@ -221,13 +214,14 @@ function Computers() {
     }
 
     try {
-      await remove(
-        ref(database, `computers/${deleteTarget.firebaseKey}`)
-      );
+      await apiRequest(`/api/computers/${encodeURIComponent(deleteTarget.firebaseKey)}`, {
+        method: "DELETE",
+      });
       setDeleteTarget(null);
-    } catch (firebaseError) {
-      console.error("ลบข้อมูลเครื่องไม่สำเร็จ:", firebaseError);
-      alert("ลบข้อมูลไม่สำเร็จ กรุณาตรวจสอบ Firebase Rules");
+      await loadComputers();
+    } catch (apiErr) {
+      console.error("ลบข้อมูลเครื่องไม่สำเร็จ:", apiErr);
+      alert(apiErr.message || "ลบข้อมูลเครื่องไม่สำเร็จ");
     }
   };
 
@@ -249,9 +243,9 @@ function Computers() {
         </button>
       </div>
 
-      {firebaseError && (
+      {apiError && (
         <div role="alert" style={{ color: "#dc2626", marginBottom: 16 }}>
-          {firebaseError}
+          {apiError}
         </div>
       )}
 

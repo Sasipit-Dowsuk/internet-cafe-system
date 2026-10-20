@@ -1,12 +1,6 @@
 
 import { useEffect, useState } from "react";
 import {
-  ref,
-  onValue,
-  push,
-  update,
-} from "firebase/database";
-import {
   Monitor,
   UserRound,
   Play,
@@ -17,7 +11,7 @@ import {
   CheckCircle2,
   AlertCircle,
 } from "lucide-react";
-import { database } from "../services/firebase";
+import { apiRequest } from "../services/api";
 
 const HOURLY_RATE = 20;
 
@@ -30,12 +24,19 @@ function formatDateTime(timestamp) {
   });
 }
 
+function toMillis(timestamp) {
+  if (!timestamp) return 0;
+  if (typeof timestamp === "number") return timestamp;
+  const parsed = new Date(timestamp).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
 function formatDuration(startTime, now = Date.now()) {
   if (!startTime) return "00:00:00";
 
   const seconds = Math.max(
     0,
-    Math.floor((now - startTime) / 1000)
+    Math.floor((now - toMillis(startTime)) / 1000)
   );
 
   const hours = Math.floor(seconds / 3600);
@@ -50,7 +51,7 @@ function formatDuration(startTime, now = Date.now()) {
 function calculateUsage(startTime, endTime) {
   const durationMinutes = Math.max(
     1,
-    Math.ceil((endTime - startTime) / 60000)
+    Math.ceil((toMillis(endTime) - toMillis(startTime)) / 60000)
   );
 
   const fee =
@@ -80,77 +81,39 @@ function Usage() {
   const [search, setSearch] = useState("");
   const [now, setNow] = useState(Date.now());
 
-  // โหลดข้อมูลลูกค้า เครื่องคอมพิวเตอร์ และรายการใช้บริการ
-  useEffect(() => {
-    let loadedCount = 0;
-    let hasError = false;
+  // โหลดข้อมูลผ่าน Node.js Backend API
+  const loadData = async () => {
+    setLoading(true);
+    setFirebaseError("");
 
-    const markLoaded = () => {
-      loadedCount += 1;
-      if (loadedCount >= 3) setLoading(false);
-    };
+    try {
+      const [customerData, computerData, sessionData] = await Promise.all([
+        apiRequest("/api/customers"),
+        apiRequest("/api/computers"),
+        apiRequest("/api/usageSessions"),
+      ]);
 
-    const handleError = (error) => {
-      console.error("Firebase error:", error);
-      hasError = true;
-      setFirebaseError(
-        "โหลดข้อมูลไม่สำเร็จ กรุณาตรวจสอบการเชื่อมต่อและ Firebase Rules"
+      setCustomers(Array.isArray(customerData) ? customerData : []);
+      setComputers(Array.isArray(computerData) ? computerData : []);
+      setSessions(
+        (Array.isArray(sessionData) ? sessionData : []).sort(
+          (a, b) => toMillis(b.startTime) - toMillis(a.startTime)
+        )
       );
+    } catch (error) {
+      console.error("Backend API error:", error);
+      setFirebaseError(
+        error.message || "โหลดข้อมูลไม่สำเร็จ กรุณาตรวจสอบว่า Backend ทำงานอยู่"
+      );
+    } finally {
       setLoading(false);
-    };
+    }
+  };
 
-    const unsubscribeCustomers = onValue(
-      ref(database, "customers"),
-      (snapshot) => {
-        const data = snapshot.val() || {};
-        setCustomers(
-          Object.entries(data).map(([key, value]) => ({
-            ...value,
-            firebaseKey: key,
-          }))
-        );
-        markLoaded();
-      },
-      handleError
-    );
-
-    const unsubscribeComputers = onValue(
-      ref(database, "computers"),
-      (snapshot) => {
-        const data = snapshot.val() || {};
-        setComputers(
-          Object.entries(data).map(([key, value]) => ({
-            ...value,
-            firebaseKey: key,
-          }))
-        );
-        markLoaded();
-      },
-      handleError
-    );
-
-    const unsubscribeSessions = onValue(
-      ref(database, "usageSessions"),
-      (snapshot) => {
-        const data = snapshot.val() || {};
-        setSessions(
-          Object.entries(data)
-            .map(([key, value]) => ({
-              ...value,
-              firebaseKey: key,
-            }))
-            .sort((a, b) => (b.startTime || 0) - (a.startTime || 0))
-        );
-        markLoaded();
-      },
-      handleError
-    );
-
-    return () => {
-      unsubscribeCustomers();
-      unsubscribeComputers();
-      unsubscribeSessions();
-    };
+  useEffect(() => {
+    loadData();
+    // โหลดข้อมูลเมื่อเปิดหน้า Usage เท่านั้น
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // อัปเดตตัวจับเวลาทุกวินาที
@@ -217,42 +180,21 @@ function Usage() {
     setSaving(true);
 
     try {
-      const startTime = Date.now();
-      const sessionRef = push(ref(database, "usageSessions"));
-
-      const customerName =
-        customer.name || customer.fullName || customer.customerName || "ไม่ระบุชื่อ";
-
-      const computerName =
-        computer.name || computer.id || "ไม่ระบุชื่อเครื่อง";
-
-      const sessionData = {
-        customerId: customer.id || customer.firebaseKey,
-        customerKey: customer.firebaseKey,
-        customerName,
-        computerId: computer.id || computer.firebaseKey,
-        computerKey: computer.firebaseKey,
-        computerName,
-        startTime,
-        status: "active",
-        hourlyRate: HOURLY_RATE,
-      };
-
-      // บันทึก session และเปลี่ยนสถานะเครื่องพร้อมกัน
-      await update(ref(database), {
-        [`usageSessions/${sessionRef.key}`]: sessionData,
-        [`computers/${computer.firebaseKey}/status`]: "in_use",
+      const result = await apiRequest("/api/usage/start", {
+        method: "POST",
+        body: JSON.stringify({
+          customerKey: selectedCustomer,
+          computerKey: selectedComputer,
+        }),
       });
 
       setSelectedCustomer("");
       setSelectedComputer("");
-      showMessage(`เริ่มใช้บริการ ${computerName} เรียบร้อยแล้ว`);
+      await loadData();
+      showMessage(result.message || `เริ่มใช้บริการ ${computer.name || computer.id} เรียบร้อยแล้ว`);
     } catch (error) {
       console.error("เริ่มใช้บริการไม่สำเร็จ:", error);
-      showMessage(
-        "เริ่มใช้บริการไม่สำเร็จ กรุณาตรวจสอบ Firebase Rules",
-        "error"
-      );
+      showMessage(error.message || "เริ่มใช้บริการไม่สำเร็จ กรุณาตรวจสอบ Backend", "error");
     } finally {
       setSaving(false);
     }
@@ -260,8 +202,8 @@ function Usage() {
 
   // สิ้นสุดการใช้บริการ
   const handleFinish = async (session) => {
-    if (!session.firebaseKey || !session.computerKey) {
-      showMessage("ข้อมูลรายการใช้บริการไม่ครบถ้วน", "error");
+    if (!session.firebaseKey) {
+      showMessage("ไม่พบรหัสรายการใช้บริการ", "error");
       return;
     }
 
@@ -275,30 +217,18 @@ function Usage() {
     setMessage("");
 
     try {
-      const endTime = Date.now();
-      const { durationMinutes, fee } = calculateUsage(
-        session.startTime,
-        endTime
+      const result = await apiRequest(
+        `/api/usage/${encodeURIComponent(session.firebaseKey)}/end`,
+        { method: "POST" }
       );
 
-      // บันทึกเวลาสิ้นสุด ค่าบริการ และคืนสถานะเครื่อง
-      await update(ref(database), {
-        [`usageSessions/${session.firebaseKey}/endTime`]: endTime,
-        [`usageSessions/${session.firebaseKey}/durationMinutes`]: durationMinutes,
-        [`usageSessions/${session.firebaseKey}/fee`]: fee,
-        [`usageSessions/${session.firebaseKey}/status`]: "completed",
-        [`computers/${session.computerKey}/status`]: "available",
-      });
-
+      await loadData();
       showMessage(
-        `สิ้นสุดบริการแล้ว ระยะเวลา ${durationMinutes} นาที ค่าบริการ ${formatMoney(fee)} บาท`
+        `${result.message || "สิ้นสุดบริการแล้ว"} ระยะเวลา ${result.durationMinutes} นาที ค่าบริการ ${formatMoney(result.fee)} บาท`
       );
     } catch (error) {
       console.error("สิ้นสุดการใช้บริการไม่สำเร็จ:", error);
-      showMessage(
-        "บันทึกการสิ้นสุดไม่สำเร็จ กรุณาตรวจสอบ Firebase Rules",
-        "error"
-      );
+      showMessage(error.message || "บันทึกการสิ้นสุดไม่สำเร็จ กรุณาตรวจสอบ Backend", "error");
     } finally {
       setSaving(false);
     }
@@ -431,7 +361,7 @@ function Usage() {
             color: "#374151",
             border: "1px solid #d1d5db",
           }}
-          onClick={() => window.location.reload()}
+          onClick={loadData}
         >
           <RefreshCw size={17} />
           รีเฟรช
@@ -533,7 +463,7 @@ function Usage() {
         </p>
 
         {loading ? (
-          <p style={styles.empty}>กำลังโหลดข้อมูลจาก Firebase...</p>
+          <p style={styles.empty}>กำลังโหลดข้อมูลจาก Backend...</p>
         ) : (
           <form onSubmit={handleStart}>
             <div style={styles.formGrid}>
@@ -641,7 +571,7 @@ function Usage() {
         </div>
 
         {loading ? (
-          <p style={styles.empty}>กำลังโหลดรายการ...</p>
+          <p style={styles.empty}>กำลังโหลดรายการจาก Backend...</p>
         ) : filteredActiveSessions.length === 0 ? (
           <div style={styles.empty}>
             <Monitor size={34} style={{ marginBottom: 8 }} />

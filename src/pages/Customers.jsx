@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useState } from "react";
 import {
   Search,
@@ -8,17 +7,7 @@ import {
   X,
   Users,
 } from "lucide-react";
-
-import {
-  ref,
-  onValue,
-  push,
-  set,
-  update,
-  remove,
-} from "firebase/database";
-
-import { database } from "../services/firebase";
+import { apiRequest } from "../services/api";
 
 const emptyForm = {
   name: "",
@@ -37,46 +26,42 @@ function Customers() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  // อ่านข้อมูลลูกค้าจาก Firebase แบบเรียลไทม์
+  // โหลดข้อมูลลูกค้าจาก Backend API
+  const loadCustomers = async () => {
+    try {
+      setError("");
+      const data = await apiRequest("/api/customers");
+
+      const customerList = (Array.isArray(data) ? data : []).map(
+        (customer) => ({
+          ...customer,
+          firebaseKey:
+            customer.firebaseKey || customer.id,
+          id: String(customer.id || customer.firebaseKey || ""),
+          name: customer.name || customer.fullName || "",
+          phone: customer.phone || "",
+          email: customer.email || "",
+        })
+      );
+
+      customerList.sort((a, b) =>
+        a.id.localeCompare(b.id)
+      );
+
+      setCustomers(customerList);
+    } catch (err) {
+      console.error("โหลดข้อมูลลูกค้าไม่สำเร็จ:", err);
+      setError(
+        err.message ||
+          "ไม่สามารถโหลดข้อมูลลูกค้าได้ กรุณาตรวจสอบ Backend"
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const customersRef = ref(database, "customers");
-
-    const unsubscribe = onValue(
-      customersRef,
-      (snapshot) => {
-        const data = snapshot.val();
-
-        if (!data) {
-          setCustomers([]);
-          setLoading(false);
-          return;
-        }
-
-        const customerList = Object.entries(data).map(
-          ([firebaseKey, customer]) => ({
-            firebaseKey,
-            id: customer.id || firebaseKey,
-            name: customer.name || "",
-            phone: customer.phone || "",
-            email: customer.email || "",
-          })
-        );
-
-        customerList.sort((a, b) =>
-          a.id.localeCompare(b.id)
-        );
-
-        setCustomers(customerList);
-        setLoading(false);
-      },
-      (firebaseError) => {
-        console.error("อ่านข้อมูลลูกค้าไม่สำเร็จ:", firebaseError);
-        setError("ไม่สามารถอ่านข้อมูลจาก Firebase ได้ กรุณาตรวจสอบการตั้งค่าและสิทธิ์ฐานข้อมูล");
-        setLoading(false);
-      }
-    );
-
-    return () => unsubscribe();
+    loadCustomers();
   }, []);
 
   // ค้นหาลูกค้า
@@ -96,6 +81,19 @@ function Customers() {
       )
     );
   }, [customers, search]);
+
+  // สร้างรหัสลูกค้า
+  const createCustomerId = () => {
+    const maxNumber = customers.reduce((max, customer) => {
+      const match = String(customer.id).match(/^CUS(\d+)$/);
+
+      return match
+        ? Math.max(max, Number(match[1]))
+        : max;
+    }, 0);
+
+    return `CUS${String(maxNumber + 1).padStart(3, "0")}`;
+  };
 
   const openAddModal = () => {
     setEditingId(null);
@@ -124,19 +122,7 @@ function Customers() {
     setError("");
   };
 
-  // สร้างรหัสลูกค้าจากรหัสที่มีอยู่
-  const createCustomerId = () => {
-    const maxNumber = customers.reduce((max, customer) => {
-      const match = String(customer.id).match(/^CUS(\d+)$/);
-      return match
-        ? Math.max(max, Number(match[1]))
-        : max;
-    }, 0);
-
-    return `CUS${String(maxNumber + 1).padStart(3, "0")}`;
-  };
-
-  // เพิ่มหรือแก้ไขข้อมูลใน Firebase
+  // เพิ่มหรือแก้ไขข้อมูลผ่าน Backend
   const handleSubmit = async (event) => {
     event.preventDefault();
     setError("");
@@ -155,7 +141,10 @@ function Customers() {
       return;
     }
 
-    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    if (
+      email &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    ) {
       setError("กรุณาตรวจสอบรูปแบบอีเมล");
       return;
     }
@@ -171,22 +160,23 @@ function Customers() {
       };
 
       if (editingId) {
-        const existingCustomer = customers.find(
-          (customer) => customer.firebaseKey === editingId
-        );
-
-        await update(
-          ref(database, `customers/${editingId}`),
-          customerData
+        // แก้ไขข้อมูลลูกค้า
+        await apiRequest(
+          `/api/customers/${encodeURIComponent(editingId)}`,
+          {
+            method: "PUT",
+            body: JSON.stringify(customerData),
+          }
         );
       } else {
-        const customersRef = ref(database, "customers");
-        const newCustomerRef = push(customersRef);
-
-        await set(newCustomerRef, {
-          ...customerData,
-          id: createCustomerId(),
-          createdAt: new Date().toISOString(),
+        // เพิ่มข้อมูลลูกค้า
+        await apiRequest("/api/customers", {
+          method: "POST",
+          body: JSON.stringify({
+            ...customerData,
+            id: createCustomerId(),
+            createdAt: new Date().toISOString(),
+          }),
         });
       }
 
@@ -194,28 +184,43 @@ function Customers() {
       setEditingId(null);
       setForm(emptyForm);
       setError("");
-    } catch (firebaseError) {
-      console.error("บันทึกข้อมูลลูกค้าไม่สำเร็จ:", firebaseError);
-      setError("บันทึกไม่สำเร็จ กรุณาตรวจสอบการเชื่อมต่อและสิทธิ์ Firebase");
+
+      await loadCustomers();
+    } catch (err) {
+      console.error("บันทึกข้อมูลลูกค้าไม่สำเร็จ:", err);
+      setError(
+        err.message ||
+          "บันทึกข้อมูลไม่สำเร็จ กรุณาตรวจสอบ Backend"
+      );
     } finally {
       setSaving(false);
     }
   };
 
-  // ลบข้อมูลจาก Firebase
+  // ลบข้อมูลลูกค้าผ่าน Backend
   const confirmDelete = async () => {
     if (!deleteTarget) return;
 
     try {
-      await remove(
-        ref(database, `customers/${deleteTarget.firebaseKey}`)
+      setError("");
+
+      await apiRequest(
+        `/api/customers/${encodeURIComponent(
+          deleteTarget.firebaseKey
+        )}`,
+        {
+          method: "DELETE",
+        }
       );
 
       setDeleteTarget(null);
-      setError("");
-    } catch (firebaseError) {
-      console.error("ลบข้อมูลลูกค้าไม่สำเร็จ:", firebaseError);
-      setError("ลบข้อมูลไม่สำเร็จ กรุณาตรวจสอบสิทธิ์ Firebase");
+      await loadCustomers();
+    } catch (err) {
+      console.error("ลบข้อมูลลูกค้าไม่สำเร็จ:", err);
+      setError(
+        err.message ||
+          "ลบข้อมูลไม่สำเร็จ กรุณาตรวจสอบ Backend"
+      );
       setDeleteTarget(null);
     }
   };
@@ -225,7 +230,9 @@ function Customers() {
       <div className="page-header">
         <div>
           <h1>จัดการข้อมูลผู้ใช้บริการ</h1>
-          <p>เพิ่ม แก้ไข ค้นหา และจัดการข้อมูลผู้ใช้บริการของร้าน</p>
+          <p>
+            เพิ่ม แก้ไข ค้นหา และจัดการข้อมูลผู้ใช้บริการของร้าน
+          </p>
         </div>
 
         <button
@@ -245,7 +252,8 @@ function Customers() {
         <div>
           <p>ผู้ใช้บริการทั้งหมด</p>
           <h2>
-            {customers.length.toLocaleString("th-TH")} <span>ราย</span>
+            {customers.length.toLocaleString("th-TH")}{" "}
+            <span>ราย</span>
           </h2>
         </div>
       </div>
@@ -263,9 +271,12 @@ function Customers() {
               type="search"
               placeholder="ค้นหารหัส ชื่อ หรือเบอร์โทร..."
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) =>
+                setSearch(event.target.value)
+              }
               aria-label="ค้นหาผู้ใช้บริการ"
             />
+
             {search && (
               <button
                 type="button"
@@ -292,7 +303,9 @@ function Customers() {
                 <th>ชื่อ-นามสกุล</th>
                 <th>เบอร์โทรศัพท์</th>
                 <th>อีเมล</th>
-                <th className="customers-actions-heading">จัดการ</th>
+                <th className="customers-actions-heading">
+                  จัดการ
+                </th>
               </tr>
             </thead>
 
@@ -300,7 +313,7 @@ function Customers() {
               {loading ? (
                 <tr>
                   <td colSpan={5} className="empty-state">
-                    กำลังโหลดข้อมูลจาก Firebase...
+                    กำลังโหลดข้อมูลจาก Backend...
                   </td>
                 </tr>
               ) : filteredCustomers.length > 0 ? (
@@ -311,24 +324,34 @@ function Customers() {
                         {customer.id}
                       </span>
                     </td>
-                    <td className="customers-name">{customer.name}</td>
+
+                    <td className="customers-name">
+                      {customer.name}
+                    </td>
+
                     <td>{customer.phone}</td>
                     <td>{customer.email || "—"}</td>
+
                     <td>
                       <div className="customers-row-actions">
                         <button
                           type="button"
                           className="customers-edit-button"
-                          onClick={() => openEditModal(customer)}
+                          onClick={() =>
+                            openEditModal(customer)
+                          }
                           aria-label={`แก้ไข ${customer.name}`}
                           title="แก้ไขข้อมูล"
                         >
                           <Pencil size={16} />
                         </button>
+
                         <button
                           type="button"
                           className="customers-delete-button"
-                          onClick={() => setDeleteTarget(customer)}
+                          onClick={() =>
+                            setDeleteTarget(customer)
+                          }
                           aria-label={`ลบ ${customer.name}`}
                           title="ลบข้อมูล"
                         >
@@ -352,11 +375,14 @@ function Customers() {
         </div>
       </div>
 
+      {/* หน้าต่างเพิ่มและแก้ไขข้อมูล */}
       {modalOpen && (
         <div
           className="customers-modal-overlay"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) closeModal();
+            if (event.target === event.currentTarget) {
+              closeModal();
+            }
           }}
         >
           <section
@@ -372,6 +398,7 @@ function Customers() {
                     ? "แก้ไขข้อมูลผู้ใช้บริการ"
                     : "เพิ่มผู้ใช้บริการ"}
                 </h2>
+
                 <p>
                   {editingId
                     ? `รหัสผู้ใช้บริการ ${
@@ -383,6 +410,7 @@ function Customers() {
                     : "กรอกข้อมูลผู้ใช้บริการที่ต้องการเพิ่ม"}
                 </p>
               </div>
+
               <button
                 type="button"
                 className="customers-close-button"
@@ -393,7 +421,10 @@ function Customers() {
               </button>
             </div>
 
-            <form className="customers-form" onSubmit={handleSubmit}>
+            <form
+              className="customers-form"
+              onSubmit={handleSubmit}
+            >
               <div className="customers-form-field">
                 <label htmlFor="customer-name">
                   ชื่อ-นามสกุล <span>*</span>
@@ -404,7 +435,10 @@ function Customers() {
                   placeholder="กรอกชื่อและนามสกุล"
                   value={form.name}
                   onChange={(event) =>
-                    setForm({ ...form, name: event.target.value })
+                    setForm({
+                      ...form,
+                      name: event.target.value,
+                    })
                   }
                   autoFocus
                   required
@@ -421,7 +455,10 @@ function Customers() {
                   placeholder="กรอกเบอร์โทรศัพท์"
                   value={form.phone}
                   onChange={(event) =>
-                    setForm({ ...form, phone: event.target.value })
+                    setForm({
+                      ...form,
+                      phone: event.target.value,
+                    })
                   }
                   required
                 />
@@ -435,7 +472,10 @@ function Customers() {
                   placeholder="example@email.com"
                   value={form.email}
                   onChange={(event) =>
-                    setForm({ ...form, email: event.target.value })
+                    setForm({
+                      ...form,
+                      email: event.target.value,
+                    })
                   }
                 />
               </div>
@@ -455,6 +495,7 @@ function Customers() {
                 >
                   ยกเลิก
                 </button>
+
                 <button
                   type="submit"
                   className="customers-primary-button"
@@ -472,6 +513,7 @@ function Customers() {
         </div>
       )}
 
+      {/* หน้าต่างยืนยันการลบ */}
       {deleteTarget && (
         <div
           className="customers-modal-overlay"
@@ -490,13 +532,20 @@ function Customers() {
             <div className="customers-delete-icon">
               <Trash2 size={24} />
             </div>
-            <h2 id="customers-delete-title">ยืนยันการลบข้อมูล</h2>
+
+            <h2 id="customers-delete-title">
+              ยืนยันการลบข้อมูล
+            </h2>
+
             <p>
-              ต้องการลบข้อมูลของ <strong>{deleteTarget.name}</strong> ใช่หรือไม่?
+              ต้องการลบข้อมูลของ{" "}
+              <strong>{deleteTarget.name}</strong> ใช่หรือไม่?
             </p>
+
             <p className="customers-delete-note">
-              ข้อมูลนี้จะถูกลบออกจาก Firebase ด้วย
+              ข้อมูลนี้จะถูกลบออกจากฐานข้อมูลด้วย
             </p>
+
             <div className="customers-modal-actions">
               <button
                 type="button"
@@ -505,6 +554,7 @@ function Customers() {
               >
                 ยกเลิก
               </button>
+
               <button
                 type="button"
                 className="customers-danger-button"
